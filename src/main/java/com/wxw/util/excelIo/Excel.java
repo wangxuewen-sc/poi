@@ -5,6 +5,8 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
@@ -23,8 +25,12 @@ import org.apache.poi.hssf.usermodel.HSSFWorkbook;
 import org.apache.poi.openxml4j.exceptions.InvalidFormatException;
 import org.apache.poi.poifs.filesystem.FileMagic;
 import org.apache.poi.ss.usermodel.CellType;
+import org.apache.poi.ss.util.CellRangeAddressList;
 import org.apache.poi.xssf.usermodel.XSSFCell;
 import org.apache.poi.xssf.usermodel.XSSFCellStyle;
+import org.apache.poi.xssf.usermodel.XSSFDataValidation;
+import org.apache.poi.xssf.usermodel.XSSFDataValidationConstraint;
+import org.apache.poi.xssf.usermodel.XSSFDataValidationHelper;
 import org.apache.poi.xssf.usermodel.XSSFRow;
 import org.apache.poi.xssf.usermodel.XSSFSheet;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
@@ -39,6 +45,8 @@ public class Excel<T> {
 	private Class<T> clasz;
 	private int excelAnnoCount;
 	private String sheetName;
+//	创建EXCEL文件
+	XSSFWorkbook workBook;
 	
 	/**
 	 * @param clasz 装数据的对象类
@@ -68,10 +76,10 @@ public class Excel<T> {
 				ExcelProperty excelProp = this.getAnnoVal(field);
 				if(excelProp.sequence()==0)zeroCount++;
 				entityMap.put(field.getName(),
-						new EntityFieldMap(field.getName(),
-								excelProp.zh(),
-								excelProp.sequence()==0 && zeroCount>1?this.excelAnnoCount:excelProp.sequence(),
-								excelProp.requisite()));
+					new EntityFieldMap(field.getName(),
+					excelProp.zh(),
+					excelProp.sequence()==0 && zeroCount>1?this.excelAnnoCount:excelProp.sequence(),
+					excelProp.requisite()));
 				this.excelAnnoCount++;
 			}
 		}
@@ -440,12 +448,10 @@ public class Excel<T> {
 	 */
 	public XSSFWorkbook createExcel(List<T> objList){
 		if(this.sheetName==null)this.sheetName="sheet";
-//		创建EXCEL文件
-		XSSFWorkbook workBook = new XSSFWorkbook();
-		
-		XSSFCellStyle contextStyle = workBook.createCellStyle();
+		this.workBook = new XSSFWorkbook();
+		XSSFCellStyle contextStyle = this.workBook.createCellStyle();
 //		创建一个工作表，设置表名
-		XSSFSheet sheet = workBook.createSheet(this.sheetName);
+		XSSFSheet sheet = this.workBook.createSheet(this.sheetName);
 //		在工作表上创建一个行
 		XSSFRow row = sheet.createRow(0);
 //		在行上创建单元格
@@ -455,9 +461,9 @@ public class Excel<T> {
 //		创建数据行
 		this.creatDataRows(sheet,objList,map,contextStyle);
 //		设置默认活动状态表
-		workBook.setActiveSheet(0);
+		this.workBook.setActiveSheet(0);
 //		输出文件
-		return workBook;
+		return this.workBook;
 		
 	}
 	
@@ -483,30 +489,153 @@ public class Excel<T> {
 			XSSFRow row = sheet.createRow(rowIndex);//创建数据行
 			T t = objList.get(rowIndex-1);
 			Field field = null;
-			for(int cellIndex=0;cellIndex<this.getExcelAnnoCount();cellIndex++) {
-				for(Entry<String, EntityFieldMap> entry:map.entrySet()) {
-					try {
-						field = this.clasz.getDeclaredField(entry.getKey());//根据属性名获取属性
-						field.setAccessible(true);
-						XSSFCell cell= row.createCell(entry.getValue().getSequence());
-						DataType dt = field.getAnnotation(ExcelProperty.class).dataType();
-						if(!DataType.NULL.equals(dt)) {
-							if(DataType.STRING.equals(dt)) {
-								cell.setCellType(CellType.STRING);
-							}else if(DataType.NUMBER.equals(dt)){
-								cell.setCellType(CellType.NUMERIC);
-							}
+			for(Entry<String, EntityFieldMap> entry:map.entrySet()) {
+				try {
+					field = this.clasz.getDeclaredField(entry.getKey());//根据属性名获取属性
+					field.setAccessible(true);
+					XSSFCell cell= row.createCell(entry.getValue().getSequence());
+					//根据注解设置单元格格式
+					DataType dt = field.getAnnotation(ExcelProperty.class).dataType();
+					if(!DataType.NULL.equals(dt)) {
+						if(DataType.STRING.equals(dt)) {
+							cell.setCellType(CellType.STRING);
+						}else if(DataType.NUMBER.equals(dt)){
+							cell.setCellType(CellType.NUMERIC);
 						}
-						cell.setCellValue(formatObjValueToStr(field,field.get(t)));
-						
-					} catch (NoSuchFieldException | SecurityException | IllegalArgumentException | IllegalAccessException e) {
-						e.printStackTrace();
-					}finally {
-						field.setAccessible(false);
 					}
+					//处理下拉列表
+					if(field.isAnnotationPresent(Select.class)) {
+						this.createSelectData(field,sheet,rowIndex,entry.getValue().getSequence());
+					}else {
+						cell.setCellValue(formatObjValueToStr(field,field.get(t)));
+					}
+						
+					
+				} catch (NoSuchFieldException | SecurityException | IllegalArgumentException | IllegalAccessException e) {
+					e.printStackTrace();
+				}finally {
+					field.setAccessible(false);
 				}
 			}
 		}
+	}
+	
+//	/**
+//	 * 
+//	 */
+//	public DataValidation getDataValidationByFormula(String formulaString,int firstRow,int lastRow,int firstCol, int lastCol) {
+//        // 加载下拉列表内容
+//        DVConstraint constraint = DVConstraint.createFormulaListConstraint(formulaString);
+//        // 设置数据有效性加载在哪个单元格上。
+//        // 四个参数分别是：起始行、终止行、起始列、终止列
+//        CellRangeAddressList regions = new CellRangeAddressList(firstRow, lastRow, firstCol, lastCol);
+//        // 数据有效性对象
+//        DataValidation dataValidationList = new HSSFDataValidation(regions, constraint);
+//        dataValidationList.createErrorBox("Error", "请选择或输入有效的选项，或下载最新模版重试！");
+//        return dataValidationList;
+//    }
+	
+	/**
+	 * 创建下拉列表菜单
+	 */
+	private void createSelectData(Field field,XSSFSheet sheet,int rowIndex,int cellIndex) {
+		Select select =field.getAnnotation(Select.class);
+		Class<?> clazz = select.clazz();
+		Method method = null;
+		Object obj = null;
+		List<?> values = null;
+		Map<?,?> cascadeValue = null;
+		try {
+			System.out.println("调用方法："+select.method());
+			method= clazz.getMethod(select.method());
+			obj = clazz.newInstance();
+			if(select.cascadeNumber()==0) {
+				values = (List<?>) method.invoke(obj, new Object[] {});
+				this.setSelectMenum(values, sheet, rowIndex, cellIndex);
+			}else {
+				cascadeValue = (Map<?, ?>) method.invoke(obj, new Object[] {});
+				String hiddenSheetName = "sheet_"+field.getName();
+				XSSFSheet hiddenSheet = this.workBook.createSheet(hiddenSheetName);
+				this.createCascade(field, cascadeValue, sheet, hiddenSheet, rowIndex, cellIndex);
+			}
+		} catch (NoSuchMethodException e) {
+			e.printStackTrace();
+		} catch (InstantiationException e) {
+			e.printStackTrace();
+		} catch (IllegalAccessException e) {
+			e.printStackTrace();
+		} catch (IllegalArgumentException e) {
+			e.printStackTrace();
+		} catch (InvocationTargetException e) {
+			e.printStackTrace();
+		}
+	}
+	
+	
+	public void createCascade(Field field,Map<?,?> cascadeValue,XSSFSheet sheet,XSSFSheet hiddenSheet,int rowIndex,int cellIndex) {
+		int rownum = 0;
+		int cellnum = 0;
+		int rows;
+		XSSFRow row;
+		for(Entry<?, ?> entry:cascadeValue.entrySet()) {
+			rows = hiddenSheet.getLastRowNum();
+			System.out.println(rows);
+			if(rows==0 && rows<=rownum) {
+				row = hiddenSheet.createRow(rownum);
+			}else {
+				row = hiddenSheet.getRow(rownum);
+			}
+			
+			XSSFCell cell = row.createCell(0);
+			cell.setCellValue((String)entry.getKey());
+			List<?> list = (List<?>) entry.getValue();
+			for(int i=0;i<list.size();i++) {
+				if(list.get(i).getClass().equals(Map.class)) {
+					
+				}else {
+					if(hiddenSheet.getLastRowNum()>=i) {
+						row = hiddenSheet.getRow(i);
+					}else {
+						row = hiddenSheet.createRow(i);
+					}
+					XSSFCell cell1 = row.createCell(cellnum+1);
+					cell1.setCellValue((String)list.get(i));
+				}
+			}
+			rownum++;
+			cellnum++;
+		}
+//		需要得到的数据map的大小、每一个list的大小；A=65,
+//		①创建一个隐藏页
+//		②把map的key值放到第一列
+//		DataValidation Lv1 = this.getDataValidationByFormula(field.getName(), 0, cascadeValue.size(), 1, 1);
+		
+	}
+	
+	/**
+	 * 单个下拉选项设置
+	 * @param values
+	 * @param sheet
+	 * @param rowIndex
+	 * @param cellIndex
+	 */
+	public void setSelectMenum(List<?> values,XSSFSheet sheet,int rowIndex,int cellIndex) {
+		// 加载下拉列表内容
+//      DVConstraint constraint = DVConstraint.createFormulaListConstraint(formulaString);
+		// 设置数据有效性加载在哪个单元格上。
+      // 四个参数分别是：起始行、终止行、起始列、终止列
+      String[] str = new String[values.size()];
+      XSSFDataValidationHelper dvHelper = new XSSFDataValidationHelper(sheet);
+      XSSFDataValidationConstraint dvConstraint = (XSSFDataValidationConstraint) dvHelper
+	            .createExplicitListConstraint(values.toArray(str));
+	    
+	    CellRangeAddressList addressList = new CellRangeAddressList(rowIndex, rowIndex, cellIndex, cellIndex);
+	    XSSFDataValidation validation = (XSSFDataValidation) dvHelper.createValidation(
+	                dvConstraint, addressList);
+	    validation.createErrorBox("错误", "请选择下拉列表中的值");
+	    validation.setSuppressDropDownArrow(true);
+	    validation.setShowErrorBox(true);//显示非法操作提示
+      sheet.addValidationData(validation);
 	}
 	
 	/****
